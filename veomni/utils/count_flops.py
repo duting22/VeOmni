@@ -56,6 +56,8 @@ def get_device_flops(unit="T"):
         flops = 119.5e12
     elif "H20" in device_name:
         flops = 148e12
+    elif device_name.startswith(("Ascend950", "Ascend910_95")):
+        flops = 486e12
     elif "910B" in device_name or "910_93" in device_name:
         flops = 354e12
     elif "GB200" in device_name:

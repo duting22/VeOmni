@@ -24,6 +24,8 @@ If a field is not in this table, it is not an op-selection knob.
 | QSA attention | `qsa_attention_implementation` | `eager`, `tilelang` (Qwen4-Exp, NVIDIA CUDA), `torch_npu` (Qwen4-Exp, Ascend NPU) | `"eager"` | Model `__init__` via an instance-local `VeomniOp` |
 | Cross-entropy loss | `cross_entropy_loss_implementation` | `eager`, `liger_kernel`, `chunk_loss` | `"liger_kernel"` (GPU, MLU), `"chunk_loss"` (NPU) | Model `__init__` via an instance-local `VeomniOp` |
 | RMSNorm | `rms_norm_implementation` | `eager`, `liger_kernel`, `torch_npu`, `triton` (per-model; DeepSeek-V3) | `"liger_kernel"` (GPU, MLU), `"torch_npu"` (NPU) | Model `__init__` via an instance-local `VeomniOp` |
+| Qwen4-Exp grouped RMSNorm | `rms_norm_grouped_implementation` | `null`, `eager`, `triton` (Ascend 950/A5, BF16) | `null` (inherit `rms_norm_implementation`) | Grouped norm `__init__` via the `rms_norm/offset` handle |
+| Qwen4-Exp Hyper-Connection (QHC) | `qhc_implementation` | `eager`, `triton` (Ascend 950/A5, BF16) | `"eager"` | QHC `__init__` binds a fused handle only for `triton` |
 | SwiGLU MLP | `swiglu_mlp_implementation` | `eager`, `liger_kernel` | `"liger_kernel"` (GPU, MLU), `"eager"` (NPU) | Model `__init__` via an instance-local `VeomniOp` |
 | Rotary embedding | `rotary_pos_emb_implementation` | `eager`, `liger_kernel`, `torch_npu`, `triton` (per-model; DeepSeek-V3, DeepSeek-V4, Wan) | `"liger_kernel"` (GPU, MLU), `"torch_npu"` (NPU) | Model `__init__` via an instance-local `VeomniOp` |
 | Vision-layout full rotary embedding | `rotary_pos_emb_vision_implementation` | `eager`, `torch_npu` | `"eager"` | Same `rope/full` op with an independent model-side implementation choice |
@@ -424,6 +426,56 @@ model:
 Qwen3.5-family `(1 + weight)` RMSNorms use the `offset` variant, which was
 named `qwen3_5` in the former `OpSlot` registry. Kernel registrations must use
 `variant="offset"`.
+
+#### Qwen4-Exp grouped RMSNorm and QHC
+
+These two fields under `model.ops_implementation` are independent:
+
+```yaml
+model:
+  ops_implementation:
+    rms_norm_grouped_implementation: null  # inherit rms_norm_implementation
+    qhc_implementation: eager              # preserve the child-module path
+```
+
+`rms_norm_grouped_implementation` applies only to Qwen4-Exp grouped offset
+RMSNorm in QHC and PLE. `null` preserves inheritance from
+`rms_norm_implementation`, `eager` forces grouped PyTorch normalization, and
+`triton` explicitly selects the Ascend 950/A5 BF16 kernel. Ordinary RMSNorm
+continues to use `rms_norm_implementation`.
+
+`qhc_implementation: triton` selects QHC pre-mixing and injection-weight
+computation, including its grouped norm. That fused QHC path consumes the norm
+weights directly and does not execute the standalone grouped norm a second time;
+the grouped selection still controls PLE and the eager QHC path. Matrix
+multiplications use native GEMMs; Triton implements normalization and elementwise
+forward/backward work. The fusion preserves existing parameters and checkpoint
+keys. MTP support and vision-tower training behavior are unchanged.
+
+Fused QHC requires plain bias-free `nn.Linear` projections with materialized
+local weights. Adapters, wrapped projections, hooks on the participating norm
+or projection children, and separately FSDP-sharded children are rejected because
+their module calls would be bypassed. Decoder-layer FSDP wrapping remains the
+supported boundary; use `qhc_implementation: eager` when child-module semantics
+are required.
+
+Both `triton` choices require Triton-Ascend, BF16 inputs, and Ascend 950/A5
+(arch35, reported as `Ascend950` or `Ascend910_95`). Non-950 NPUs and other
+devices are rejected. Missing dependencies and compilation errors propagate;
+explicit selection never falls back to eager. Validate numerical parity and
+performance on the target Ascend software stack with representative shapes
+and training settings before enabling these selections.
+
+The 950 launch planner uses reported core counts and UB capacity when available.
+When Triton-Ascend omits a field, it retains mcore-bridge's scheduling defaults:
+40 cores and a 192 KiB UB budget. These are launch-planning defaults, not hardware
+specifications. Driver query errors and tiles exceeding the UB budget still raise.
+
+QHC retains the eager graph's BF16 sigmoid outputs, products and intermediate
+gradients within its fused postprocessing. Scaled SiLU uses the same native
+backward as `F.silu`, including the BF16 result before the group-size division.
+When both outputs are used, norm-input gradients accumulate the direct mixing
+and injection branches before adding the down-projection branch, as in eager.
 
 #### `rotary_pos_emb_implementation`
 

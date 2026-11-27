@@ -101,6 +101,38 @@ QSA layers and checkpoint recomputation. Only rank-local query segment maps are
 materialized. Device tensors are not cached across forwards; direct indexer
 calls prepare their own metadata through the same validated path.
 
+## Optional Ascend 950 grouped RMSNorm and QHC
+
+The following fields select the two paths independently:
+
+```yaml
+model:
+  ops_implementation:
+    rms_norm_grouped_implementation: triton
+    qhc_implementation: triton
+```
+
+Both selections require Ascend 950/A5 (arch35), BF16 inputs, and Triton-Ascend.
+`rms_norm_grouped_implementation` defaults to `null`, inheriting
+`rms_norm_implementation`; `eager` forces grouped PyTorch normalization.
+It covers grouped offset norms in QHC and PLE, while ordinary norms keep their
+existing selection. `qhc_implementation` defaults to `eager` and preserves
+calls to the norm and projection modules. Its `triton` path includes grouped
+normalization within QHC, so the standalone grouped norm is not executed again.
+
+The QHC fusion uses native GEMMs for projections and Triton for normalization
+and elementwise forward/backward work. It requires plain bias-free `nn.Linear`
+projections with materialized local weights, no hooks on participating child
+modules, and no separately FSDP-sharded children. Keep FSDP wrapping at the decoder
+layer. Unsupported hardware, missing dependencies, and compilation errors raise
+without falling back to eager. Parameters and checkpoint keys are preserved;
+MTP remains unsupported, and vision-tower training behavior is unchanged. See
+[op selection](../../../../docs/design/op_selection.md#qwen4-exp-grouped-rmsnorm-and-qhc)
+for the full selection contract.
+
+Validate outputs and gradients against the eager path on the target Ascend
+software stack before enabling these selections in training.
+
 ## Two-device pipeline regression
 
 Run the daily toy regression with:

@@ -44,7 +44,8 @@ when the selected implementation runs.
 |---|---|---|
 | `attention` | `standard` | `eager`, `sdpa`, and FlashAttention/AITER/FlexAttention/MagiAttention/SageAttention names |
 | `async_ulysses_qkv`, `async_ulysses_o` | `standard`, `dit` | `eager` orchestration |
-| `rms_norm` | `standard`, `deepseek_v4`, `unweighted`, `offset` | `eager`, `liger_kernel`, `torch_npu`, and `triton` where supported; all accept optional `group_size` (fused weighted rows delegate grouped calls to eager) |
+| `rms_norm` | `standard`, `deepseek_v4`, `unweighted`, `offset` | `eager`, `liger_kernel`, `torch_npu`, and `triton` where supported; all accept optional `group_size` (Liger and `torch_npu` weighted rows delegate grouped calls to eager) |
+| `qhc` | `mixer`, `gated` | `eager`, `triton` (Qwen4-Exp, Ascend 950/A5, BF16); the default eager model path calls its original child modules |
 | `layer_norm` | `standard` | `eager`, `apex` (`fused_layer_norm_cuda`); nested by async Ulysses QKV when `norm_type="layernorm"` |
 | `rope` | `full`, `partial`, `interleave`, `mrope`, `deepseek_v4`, `wan` | `eager`, `liger_kernel`, `torch_npu`, and `triton` where supported; `full` also accepts rank-3 vision layout |
 | `swiglu_mlp` | `standard`, `geglu` | `eager`, `liger_kernel` |
@@ -87,6 +88,22 @@ atomic scatter, at the cost of sorting and a partial-gradient workspace.
 aligned), builds a local boolean mask via `int8` scatter, and calls
 `torch_npu.npu_fusion_attention` / `npu_fusion_attention_grad` without forward
 replay.
+
+Qwen4-Exp grouped offset RMSNorm has an independent
+`rms_norm_grouped_implementation` selection: unset (`null`) inherits
+`rms_norm_implementation`, `eager` forces the grouped PyTorch path, and
+`triton` selects the Ascend 950/A5 BF16 implementation. Ordinary RMSNorm keeps
+its existing selection. `qhc_implementation` independently defaults to `eager`;
+its `triton` path includes grouped normalization within QHC, so it does not call
+the standalone grouped norm again. QHC projections use native GEMMs, while
+Triton handles normalization and elementwise operations in forward and backward.
+The fused path requires plain bias-free `nn.Linear` projections, no hooks on
+the participating child modules, and no independently FSDP-sharded children.
+Both explicit Triton selections require Triton-Ascend and reject unsupported
+hardware, including non-950 Ascend devices; missing dependencies and compilation
+errors propagate without an eager fallback. See
+[op selection](../../docs/design/op_selection.md#qwen4-exp-grouped-rmsnorm-and-qhc)
+for configuration and validation limits.
 
 The registry is the source of truth for the exact rows available in a given
 revision:

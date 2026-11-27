@@ -225,6 +225,17 @@ Modeling passes `config.ops_config.<field>` directly to `VeomniOp`. The attentio
 `veomni_sdpa`. On NPU, unweighted RMSNorm supports only `eager`; explicit
 `torch_npu`/`npu` is rejected rather than remapped across variants.
 
+Qwen4-Exp has two independent selections: `rms_norm_grouped_implementation`
+defaults to `None` and inherits ordinary `rms_norm_implementation` for grouped
+QHC/PLE offset norms; `qhc_implementation` defaults to `eager`. Explicit `triton`
+selects Ascend 950/A5 BF16 kernels only. QHC includes its grouped norm, uses native
+GEMMs with Triton normalization/elementwise work, and bypasses child module calls,
+so plain bias-free projections without child hooks or separate child FSDP are
+required. Ordinary norms, MTP support and vision training behavior are unchanged.
+Unsupported hardware, missing dependencies and compilation errors raise without fallback.
+See [op selection](../../docs/design/op_selection.md#qwen4-exp-grouped-rmsnorm-and-qhc)
+for configuration and validation requirements.
+
 The public configuration field remains `model.ops_implementation`. Trainer and
 inference entry points pass it to the model builder as
 `ops_implementation`; changing the config field would break existing CLI

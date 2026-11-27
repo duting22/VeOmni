@@ -32,7 +32,9 @@
 #    - method_override: Qwen4ExpTextAttention.__init__
 #      Pass config to Qwen4ExpTextRMSNorm and bind instance-local rope and QSA attention VeomniOps
 #    - method_override: Qwen4ExpTextGatedResidual.__init__
-#      Pass config to Qwen4ExpTextRMSNorm
+#      Configure grouped RMSNorm and an optional Ascend 950 QHC fusion
+#    - method_override: Qwen4ExpTextGatedResidual.forward
+#      Opt into the Ascend 950 QHC fusion while preserving the eager module path
 #    - method_override: Qwen4ExpTextPLELayer.__init__
 #      Pass config to Qwen4ExpTextRMSNorm
 #    - method_override: Qwen4ExpTextAttention.forward
@@ -143,6 +145,7 @@ from veomni.models.transformers.qwen4_exp.packed_ple import (
     local_packed_boundary_indices,
     local_packed_positions,
 )
+from veomni.models.transformers.qwen4_exp.qhc_fusion import validate_qhc_modules
 from veomni.models.transformers.qwen4_exp.qsa_metadata import PreparedQSAMetadata, prepare_qsa_metadata
 from veomni.models.utils.moe_utils import merged_experts_act_fn_forward
 from veomni.ops import VeomniOp
@@ -428,6 +431,10 @@ class Qwen4ExpTextRMSNorm(nn.Module):
         if group_size is not None and dim % group_size != 0:
             raise ValueError(f"hidden_size ({dim}) must be divisible by group_size ({group_size}).")
         rms_norm_impl = config.ops_config.rms_norm_implementation if config is not None else "eager"
+        if group_size is not None and config is not None:
+            grouped_impl = config.ops_config.rms_norm_grouped_implementation
+            if grouped_impl is not None:
+                rms_norm_impl = grouped_impl
         self.veomni_rms_norm = VeomniOp("rms_norm", "offset", rms_norm_impl)
 
     def _norm(self, x: torch.Tensor) -> torch.Tensor:
@@ -1532,7 +1539,7 @@ class Qwen4ExpTextSparseMoeBlock(nn.Module):
 
 # ======================================================================
 # [MODIFIED CLASS] Qwen4ExpTextGatedResidual
-# Methods patched: __init__
+# Methods patched: __init__, forward
 # ======================================================================
 
 
@@ -1548,14 +1555,37 @@ class Qwen4ExpTextGatedResidual(nn.Module):
         self.input_mix_weight_down = nn.Linear(hc_hidden_size, config.hc_lowrank, bias=False)
         self.input_mix_weight_up = nn.Linear(config.hc_lowrank, hc_hidden_size, bias=False)
         self.block_inject_weight = nn.Linear(hc_hidden_size, self.hc_count, bias=False) if use_combine else None
+        self.veomni_qhc = (
+            VeomniOp("qhc", "gated" if use_combine else "mixer", "triton")
+            if config.ops_config.qhc_implementation == "triton"
+            else None
+        )
 
-    def forward(
-        self, hyper_input: torch.Tensor
-    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, hyper_input):
         if hyper_input.shape[-1] != self.hc_count * self.hidden_size:
             raise ValueError(
-                f"Expected {self.hc_count * self.hidden_size} hyper-connection features, got {hyper_input.shape[-1]}."
+                f"Expected hyper_input.shape[-1] to be {self.hc_count * self.hidden_size}, "
+                f"but got {hyper_input.shape[-1]} instead."
             )
+        # --- Patch.1: Explicit QHC selection; retain the residual tensor outside the fused op. ---
+        if self.veomni_qhc is not None:
+            validate_qhc_modules(self)
+            weights = (
+                self.hc_norm.weight,
+                self.input_mix_weight_down.weight,
+                self.input_mix_weight_up.weight,
+            )
+            if self.block_inject_weight is None:
+                return self.veomni_qhc(hyper_input, *weights, hc_count=self.hc_count, eps=self.hc_norm.eps)
+            mixed_input, injection_weights = self.veomni_qhc(
+                hyper_input,
+                *weights,
+                self.block_inject_weight.weight,
+                hc_count=self.hc_count,
+                eps=self.hc_norm.eps,
+            )
+            return mixed_input, hyper_input, injection_weights
+        # --- Patch.1 ---
         hyper_input_normed = self.hc_norm(hyper_input)
         input_mix_weight = F.silu(self.input_mix_weight_down(hyper_input_normed) / self.hc_count)
         input_mix_weight = torch.sigmoid(self.input_mix_weight_up(input_mix_weight))

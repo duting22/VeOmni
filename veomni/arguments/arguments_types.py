@@ -1371,6 +1371,8 @@ class TrainingArguments:
 # names alone do not capture per-model compatibility.
 _NPU_ALLOWED: Dict[str, frozenset] = {
     "rms_norm_implementation": frozenset({"torch_npu"}),
+    "rms_norm_grouped_implementation": frozenset({"triton"}),
+    "qhc_implementation": frozenset({"triton"}),
     "rotary_pos_emb_implementation": frozenset({"torch_npu"}),
     "rotary_pos_emb_vision_implementation": frozenset({"torch_npu"}),
     "swiglu_mlp_implementation": frozenset(),
@@ -1381,6 +1383,8 @@ _NPU_ALLOWED: Dict[str, frozenset] = {
 
 _NPU_REQUIRED: Dict[str, frozenset] = {
     "rms_norm_implementation": frozenset({"torch_npu"}),
+    "rms_norm_grouped_implementation": frozenset({"triton"}),
+    "qhc_implementation": frozenset({"triton"}),
     "rotary_pos_emb_implementation": frozenset({"torch_npu"}),
     "rotary_pos_emb_vision_implementation": frozenset({"torch_npu"}),
     "moe_implementation": frozenset({"fused_npu"}),
@@ -1532,6 +1536,25 @@ class OpsImplementationConfig:
             "unweighted requires 'eager' or an unset selection on Ascend) | "
             "'triton' (DeepSeek-V3 batch-invariant; GPU only) | 'eager'. "
             "Unset: 'liger_kernel' on GPU/MLU, 'torch_npu' on NPU."
+        },
+    )
+    rms_norm_grouped_implementation: Optional[Literal["eager", "triton"]] = field(
+        default=None,
+        metadata={
+            "help": "Qwen4-Exp grouped offset RMSNorm only (QHC and PLE). "
+            "Unset inherits rms_norm_implementation; 'eager' uses PyTorch; "
+            "'triton' opts into the Ascend 950/A5 BF16 kernel and raises on unsupported hardware. "
+            "Ordinary RMSNorm is unaffected. Requires triton-ascend."
+        },
+    )
+    qhc_implementation: Literal["eager", "triton"] = field(
+        default="eager",
+        metadata={
+            "help": "Qwen4-Exp Hyper-Connection pre-mixing and injection-weight computation. "
+            "'eager' preserves the projection modules; 'triton' opts into the Ascend 950/A5 BF16 "
+            "fusion with native GEMMs (requires triton-ascend, plain bias-free nn.Linear projections). "
+            "Unsupported hardware, wrapped projections and child-module hooks raise. "
+            "Independent of rms_norm_grouped_implementation; defaults to 'eager'."
         },
     )
     swiglu_mlp_implementation: Optional[str] = field(
@@ -1778,6 +1801,14 @@ class OpsImplementationConfig:
         compatibility are validated by instance-local ``VeomniOp``
         resolution — not duplicated here.
         """
+        for field_name in ("rms_norm_grouped_implementation", "qhc_implementation"):
+            value = getattr(self, field_name)
+            allowed = (
+                (None, "eager", "triton") if field_name == "rms_norm_grouped_implementation" else ("eager", "triton")
+            )
+            if value not in allowed:
+                raise ValueError(f"{field_name}={value!r} must be one of {allowed}.")
+
         if self.moe_implementation == "deepgemm_fp8" and self.qat_implementation != "none":
             raise ValueError(
                 "moe_implementation='deepgemm_fp8' cannot be combined with "

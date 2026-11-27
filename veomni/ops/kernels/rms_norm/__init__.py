@@ -23,12 +23,14 @@ registers an eager row plus optional CUDA / NPU adapters.
 
 from ...platform import GpuKernelRequirement, MluKernelRequirement, NpuKernelRequirement
 from ...registry import register_op
+from .._ascend950 import Ascend950KernelRequirement
 from .deepseek_v4 import eager as deepseek_v4_eager
 from .deepseek_v4 import liger_kernel as deepseek_v4_liger
 from .deepseek_v4 import torch_npu as deepseek_v4_npu
 from .offset import eager as offset_eager
 from .offset import liger_kernel as offset_liger
 from .offset import torch_npu as offset_npu
+from .offset import triton as offset_triton
 from .standard import eager as standard_eager
 from .standard import liger_kernel as standard_liger
 from .standard import torch_npu as standard_npu
@@ -182,6 +184,17 @@ register_op(
     description="torch_npu RMSNorm with offset-1 weights and Gemma-style scaling",
     requirement=NpuKernelRequirement(),
     default=True,
+)
+
+register_op(
+    "rms_norm",
+    "offset",
+    "triton",
+    offset_triton.forward,
+    offset_triton.backward,
+    description="Ascend 950 Triton grouped RMSNorm with FP32 offset-1 affine scaling",
+    requirement=Ascend950KernelRequirement(),
+    requires=("triton", "torch_npu"),
 )
 
 register_op(

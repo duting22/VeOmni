@@ -70,6 +70,7 @@ from veomni.models.transformers.qwen4_exp.packed_ple import (
     local_packed_boundary_indices,
     local_packed_positions,
 )
+from veomni.models.transformers.qwen4_exp.qhc_fusion import validate_qhc_modules
 from veomni.models.transformers.qwen4_exp.qsa_metadata import PreparedQSAMetadata, prepare_qsa_metadata
 from veomni.models.utils.moe_utils import merged_experts_act_fn_forward
 from veomni.ops import VeomniOp
@@ -115,6 +116,10 @@ def qwen4_exp_rmsnorm_init_patched(
     if group_size is not None and dim % group_size != 0:
         raise ValueError(f"hidden_size ({dim}) must be divisible by group_size ({group_size}).")
     rms_norm_impl = config.ops_config.rms_norm_implementation if config is not None else "eager"
+    if group_size is not None and config is not None:
+        grouped_impl = config.ops_config.rms_norm_grouped_implementation
+        if grouped_impl is not None:
+            rms_norm_impl = grouped_impl
     self.veomni_rms_norm = VeomniOp("rms_norm", "offset", rms_norm_impl)
 
 
@@ -187,6 +192,7 @@ config.add_import(
 )
 config.add_import("veomni.distributed.sequence_parallel.gdn_exchange", names=["coalesced_gather_aligned"])
 config.add_import("veomni.ops", names=["VeomniOp"])
+config.add_import("veomni.models.transformers.qwen4_exp.qhc_fusion", names=["validate_qhc_modules"])
 config.add_import("veomni.ops.kernels.swiglu_mlp", names=["has_plain_linear_projections"])
 config.add_import("veomni.models.utils.moe_utils", names=["merged_experts_act_fn_forward"])
 config.add_import("veomni.models.loss_utils", names=["ForCausalLMLoss", "load_balancing_loss"])
@@ -895,7 +901,7 @@ def qwen4_exp_text_attention_init_patched(self, config, layer_idx: int):
 
 @config.override_method(
     "Qwen4ExpTextGatedResidual.__init__",
-    description="Pass config to Qwen4ExpTextRMSNorm",
+    description="Configure grouped RMSNorm and an optional Ascend 950 QHC fusion",
 )
 def qwen4_exp_text_gated_residual_init_patched(self, config, use_combine: bool = True):
     nn.Module.__init__(self)
@@ -908,6 +914,51 @@ def qwen4_exp_text_gated_residual_init_patched(self, config, use_combine: bool =
     self.input_mix_weight_down = nn.Linear(hc_hidden_size, config.hc_lowrank, bias=False)
     self.input_mix_weight_up = nn.Linear(config.hc_lowrank, hc_hidden_size, bias=False)
     self.block_inject_weight = nn.Linear(hc_hidden_size, self.hc_count, bias=False) if use_combine else None
+    self.veomni_qhc = (
+        VeomniOp("qhc", "gated" if use_combine else "mixer", "triton")
+        if config.ops_config.qhc_implementation == "triton"
+        else None
+    )
+
+
+@config.override_method(
+    "Qwen4ExpTextGatedResidual.forward",
+    description="Opt into the Ascend 950 QHC fusion while preserving the eager module path",
+)
+def qwen4_exp_text_gated_residual_forward_patched(self, hyper_input):
+    if hyper_input.shape[-1] != self.hc_count * self.hidden_size:
+        raise ValueError(
+            f"Expected hyper_input.shape[-1] to be {self.hc_count * self.hidden_size}, "
+            f"but got {hyper_input.shape[-1]} instead."
+        )
+    # --- Patch.1: Explicit QHC selection; retain the residual tensor outside the fused op. ---
+    if self.veomni_qhc is not None:
+        validate_qhc_modules(self)
+        weights = (
+            self.hc_norm.weight,
+            self.input_mix_weight_down.weight,
+            self.input_mix_weight_up.weight,
+        )
+        if self.block_inject_weight is None:
+            return self.veomni_qhc(hyper_input, *weights, hc_count=self.hc_count, eps=self.hc_norm.eps)
+        mixed_input, injection_weights = self.veomni_qhc(
+            hyper_input,
+            *weights,
+            self.block_inject_weight.weight,
+            hc_count=self.hc_count,
+            eps=self.hc_norm.eps,
+        )
+        return mixed_input, hyper_input, injection_weights
+    # --- Patch.1 ---
+    hyper_input_normed = self.hc_norm(hyper_input)
+    input_mix_weight = F.silu(self.input_mix_weight_down(hyper_input_normed) / self.hc_count)
+    input_mix_weight = torch.sigmoid(self.input_mix_weight_up(input_mix_weight))
+    input_mix_weight = input_mix_weight.unflatten(-1, (self.hc_count, self.hidden_size))
+    mixed_input = (input_mix_weight * hyper_input_normed.unflatten(-1, (self.hc_count, self.hidden_size))).mean(dim=-2)
+    if self.block_inject_weight is None:
+        return mixed_input
+    injection_weights = 2 * torch.sigmoid(self.block_inject_weight(hyper_input_normed) / self.hc_count)
+    return mixed_input, hyper_input, injection_weights
 
 
 @config.override_method(

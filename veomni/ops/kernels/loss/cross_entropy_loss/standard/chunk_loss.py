@@ -70,7 +70,7 @@ def forward(
     logits_bias_weight: Tensor | None = None,
     *,
     ignore_index: int = -100,
-    num_items_in_batch: int | None = None,
+    num_items_in_batch: int | Tensor | None = None,
     chunk_size: int = 1024,
     grad_enabled: bool | None = None,
 ) -> tuple[Tensor, SavedState]:
@@ -252,6 +252,56 @@ def forward(
         saved_tensors,
         _Meta(True, hidden_needs_grad, weight_needs_grad, bias_needs_grad, bias_weight_needs_grad),
     )
+
+
+def forward_valid_only(
+    hidden: Tensor,
+    labels: Tensor,
+    weight: Tensor,
+    logits_bias: Tensor | None = None,
+    logits_bias_weight: Tensor | None = None,
+    *,
+    ignore_index: int = -100,
+    num_items_in_batch: int | Tensor | None = None,
+    chunk_size: int = 1024,
+    grad_enabled: bool | None = None,
+) -> tuple[Tensor, SavedState]:
+    """Compact supervised rows before chunked projection and restore the full hidden gradient."""
+    options = dict(
+        ignore_index=ignore_index,
+        num_items_in_batch=num_items_in_batch,
+        chunk_size=chunk_size,
+        grad_enabled=grad_enabled,
+    )
+    if (
+        torch.compiler.is_compiling()
+        or logits_bias is not None
+        or logits_bias_weight is not None
+        or _CAPTURE.get() is not None
+        or hidden.numel() == 0
+        or weight.numel() == 0
+    ):
+        return forward(hidden, labels, weight, logits_bias, logits_bias_weight, **options)
+
+    hidden_flat, labels_flat = _eager.flatten_tokens(hidden, labels)
+    valid_rows = (labels_flat != ignore_index).nonzero(as_tuple=True)[0]
+    valid_count = valid_rows.numel()
+    if valid_count == labels_flat.numel():
+        return forward(hidden, labels, weight, **options)
+
+    compact_hidden = hidden_flat.index_select(0, valid_rows)
+    # The registry runs raw forwards under no_grad, so the gather loses this flag.
+    compact_hidden.requires_grad_(hidden.requires_grad)
+    compact_labels = labels_flat.index_select(0, valid_rows)
+    if num_items_in_batch is None:
+        options["num_items_in_batch"] = valid_count
+    loss, saved = forward(compact_hidden, compact_labels, weight, **options)
+    if saved.metadata.hidden_needs_grad:
+        grad_hidden = hidden_flat.new_zeros(hidden_flat.shape)
+        if valid_count:
+            grad_hidden.index_copy_(0, valid_rows, saved.tensors[0])
+        saved = SavedState((grad_hidden.reshape_as(hidden), *saved.tensors[1:]), saved.metadata)
+    return loss, saved
 
 
 def backward(

@@ -1377,7 +1377,7 @@ _NPU_ALLOWED: Dict[str, frozenset] = {
     "rotary_pos_emb_vision_implementation": frozenset({"torch_npu"}),
     "swiglu_mlp_implementation": frozenset(),
     "load_balancing_loss_implementation": frozenset(),
-    "cross_entropy_loss_implementation": frozenset({"chunk_loss"}),
+    "cross_entropy_loss_implementation": frozenset({"chunk_loss", "chunk_loss_valid_only"}),
     "moe_implementation": frozenset({"fused_npu"}),
 }
 
@@ -1387,6 +1387,7 @@ _NPU_REQUIRED: Dict[str, frozenset] = {
     "qhc_implementation": frozenset({"triton"}),
     "rotary_pos_emb_implementation": frozenset({"torch_npu"}),
     "rotary_pos_emb_vision_implementation": frozenset({"torch_npu"}),
+    "cross_entropy_loss_implementation": frozenset({"chunk_loss_valid_only"}),
     "moe_implementation": frozenset({"fused_npu"}),
 }
 
@@ -1525,7 +1526,8 @@ class OpsImplementationConfig:
             "help": "Cross-entropy loss. 'liger_kernel' (GPU, MLU; fused linear+CE — "
             "requires VeOmni-patched modeling that passes hidden_states=/weights= to "
             "self.loss_function; unpatched HF models raise) | 'chunk_loss' (chunked "
-            "F.linear+CE, hardware-agnostic) | 'eager' (PyTorch F.cross_entropy). "
+            "F.linear+CE, hardware-agnostic) | 'chunk_loss_valid_only' (NPU, "
+            "skip projection of ignored targets) | 'eager' (PyTorch F.cross_entropy). "
             "Unset: 'liger_kernel' on GPU/MLU, 'chunk_loss' on NPU."
         },
     )

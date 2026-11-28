@@ -36,6 +36,9 @@ from .chunk_logprobs import chunk_logprobs_function
 from .chunk_topk_distill import chunk_topk_distill_function
 
 
+_CHUNK_LOSS_IMPLS = ("chunk_loss", "chunk_loss_valid_only")
+
+
 def _default_op() -> VeomniOp:
     """Return the default eager token-level cross-entropy op."""
     return VeomniOp("cross_entropy_loss", "standard", "eager")
@@ -212,9 +215,10 @@ def ForCausalLMLoss(
             )
         logits_bias = logits_bias.reshape(-1, logits_bias.size(-1))
         token_op = _chunk_loss_op() if op is None else op
-        if getattr(token_op, "impl", None) not in ("chunk_loss", "eager"):
+        bias_impls = (*_CHUNK_LOSS_IMPLS, "eager")
+        if getattr(token_op, "impl", None) not in bias_impls:
             raise NotImplementedError(
-                "logits_bias is only supported by cross_entropy_loss_implementation in ('chunk_loss', 'eager') "
+                f"logits_bias is only supported by cross_entropy_loss_implementation in {bias_impls} "
                 "on the fused hidden_states + weights path."
             )
     else:
@@ -233,7 +237,7 @@ def ForCausalLMLoss(
 
     hidden, weight, out_logits = _select_hidden_weight(logits, hidden_states, weights)
     token_kwargs: dict[str, Any] = {}
-    if getattr(token_op, "impl", None) == "chunk_loss":
+    if getattr(token_op, "impl", None) in _CHUNK_LOSS_IMPLS:
         token_kwargs["chunk_size"] = chunk_size
     if logits_bias is not None:
         token_kwargs["logits_bias"] = logits_bias

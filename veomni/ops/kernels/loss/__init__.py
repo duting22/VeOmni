@@ -20,8 +20,8 @@
 
 ``cross_entropy_loss`` ``standard`` is token-level CE. Empty ``weight`` means
 the first tensor is already logits; that path is eager-only.
-``liger_kernel`` and ``chunk_loss`` require a projection weight. Label
-shift and SP reduction stay in the caller.
+``liger_kernel``, ``chunk_loss``, and ``chunk_loss_valid_only`` require a
+projection weight. Label shift and SP reduction stay in the caller.
 
 ``token_logprobs`` ``standard`` computes per-token ``log p(y_t)`` from
 already-projected logits and target labels, with device-separated rows for
@@ -119,6 +119,16 @@ register_op(
     description="Chunked token-level cross-entropy loss",
     requirement=_NPU,
     default=True,
+)
+
+register_op(
+    "cross_entropy_loss",
+    "standard",
+    "chunk_loss_valid_only",
+    ce_chunk.forward_valid_only,
+    ce_chunk.backward,
+    description="Chunked cross-entropy with projection restricted to supervised rows",
+    requirement=_NPU,
 )
 
 register_op(

@@ -51,7 +51,7 @@ when the selected implementation runs.
 | `swiglu_mlp` | `standard`, `geglu` | `eager`, `liger_kernel` |
 | `moe_experts` | `standard`, `gpt_oss` | `eager`, `fused_triton`, `fused_quack`, `deepgemm_fp8` (standard, SM90/SM100), `fused_npu`, `fused_mlu` as supported by the variant |
 | `moe_experts_lora` | `independent`, `shared` | `eager`, `fused_triton`, `fused_npu` |
-| `cross_entropy_loss` | `standard` | `eager`, `chunk_loss`, `liger_kernel` |
+| `cross_entropy_loss` | `standard` | `eager`, `chunk_loss`, `chunk_loss_valid_only` (Ascend NPU), `liger_kernel` |
 | `token_logprobs` | `standard` | `eager`, `flash_attn` (GPU Triton cross-entropy), `torch_npu` (Ascend NPU cross-entropy) |
 | `load_balancing_loss` | `standard` | `eager`, `triton` |
 | `rms_norm_gated`, `causal_conv1d`, `chunk_gated_delta_rule` | `standard` | `eager`, `fla` (CUDA, MLU, NPU), `flash_qla`, `torch_npu`, `triton` (Triton-Ascend), `fla_npu` as supported by the family |

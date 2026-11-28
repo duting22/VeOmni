@@ -22,7 +22,7 @@ If a field is not in this table, it is not an op-selection knob.
 | DSA attention | `dsa_attention_implementation` | `eager`, `flashmla_cudnn` (GLM-DSA), `tilelang` (DeepSeek-V4), `triton` (DeepSeek-V4), `cann` (DeepSeek-V4) | `"eager"` | Model `__init__` via an instance-local `VeomniOp` |
 | mHC | `mhc_implementation` | `eager`, `tilelang` (DeepSeek-V4, SM90+), `cann` (DeepSeek-V4, Ascend) | `"eager"` | Model `__init__` via three instance-local `VeomniOp`s (`pre`, `post`, `head`) |
 | QSA attention | `qsa_attention_implementation` | `eager`, `tilelang` (Qwen4-Exp, NVIDIA CUDA), `torch_npu` (Qwen4-Exp, Ascend NPU) | `"eager"` | Model `__init__` via an instance-local `VeomniOp` |
-| Cross-entropy loss | `cross_entropy_loss_implementation` | `eager`, `liger_kernel`, `chunk_loss` | `"liger_kernel"` (GPU, MLU), `"chunk_loss"` (NPU) | Model `__init__` via an instance-local `VeomniOp` |
+| Cross-entropy loss | `cross_entropy_loss_implementation` | `eager`, `liger_kernel`, `chunk_loss`, `chunk_loss_valid_only` (NPU) | `"liger_kernel"` (GPU, MLU), `"chunk_loss"` (NPU) | Model `__init__` via an instance-local `VeomniOp` |
 | RMSNorm | `rms_norm_implementation` | `eager`, `liger_kernel`, `torch_npu`, `triton` (per-model; DeepSeek-V3) | `"liger_kernel"` (GPU, MLU), `"torch_npu"` (NPU) | Model `__init__` via an instance-local `VeomniOp` |
 | Qwen4-Exp grouped RMSNorm | `rms_norm_grouped_implementation` | `null`, `eager`, `triton` (Ascend 950/A5, BF16) | `null` (inherit `rms_norm_implementation`) | Grouped norm `__init__` via the `rms_norm/offset` handle |
 | Qwen4-Exp Hyper-Connection (QHC) | `qhc_implementation` | `eager`, `triton` (Ascend 950/A5, BF16) | `"eager"` | QHC `__init__` binds a fused handle only for `triton` |
@@ -298,7 +298,7 @@ CANN has no head kernel.
 ```yaml
 model:
   ops_implementation:
-    cross_entropy_loss_implementation: liger_kernel   # default; set to "chunk_loss" / "eager" on NPU
+    cross_entropy_loss_implementation: chunk_loss_valid_only  # opt in on Ascend NPU
 ```
 
 **Field:** `OpsImplementationConfig.cross_entropy_loss_implementation`
@@ -309,6 +309,7 @@ model:
 |-------|---------------|---|
 | `liger_kernel` | Fused linear + CE raw forward/backward | `liger-kernel` package + CUDA/MLU |
 | `chunk_loss` | Chunked `F.linear` + CE with one global denominator | — |
+| `chunk_loss_valid_only` | Chunked `F.linear` + CE over rows whose target differs from `ignore_index` | Ascend NPU |
 | `eager` | PyTorch `F.linear`/`F.cross_entropy` | — |
 
 All registered rows implement the same token-level `standard` contract:
@@ -318,6 +319,12 @@ require a projection weight. Causal shifting, sequence-classification label
 policy, and SP reduction are outside the op in
 `models/loss_utils/cross_entropy_loss.py`, so chunked CE is no longer
 causal-only.
+
+`chunk_loss_valid_only` compacts hidden rows before LM head projection from
+the final targets (after causal shifting), then restores the original hidden
+gradient shape. It uses the same loss denominator as `chunk_loss`. Calls with
+logits bias, active per-token loss capture, or `torch.compile` use the regular
+`chunk_loss` path. Ascend NPU defaults to `chunk_loss`.
 
 Selecting `liger_kernel` requires that the model's forward pass provide
 `hidden_states=` and `weights=self.lm_head.weight` through

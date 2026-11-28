@@ -14,6 +14,7 @@
 
 # Following codes are inspired from https://github.com/volcengine/verl/blob/main/verl/utils/device.py
 
+import os
 from typing import Any
 
 import torch
@@ -33,6 +34,9 @@ IS_NPU_AVAILABLE = is_torch_npu_available() and hasattr(torch, "npu")
 IS_MLU_AVAILABLE = is_torch_mlu_available()
 
 if IS_NPU_AVAILABLE:
+    jit_mode = os.getenv("VEOMNI_NPU_JIT_COMPILE")
+    if jit_mode is not None:
+        torch.npu.set_compile_mode(jit_compile=jit_mode.lower() == "true")
     torch.npu.config.allow_internal_format = False
 
 MOE_TRITON_DEVICE_TYPES = ("cuda", "mlu")

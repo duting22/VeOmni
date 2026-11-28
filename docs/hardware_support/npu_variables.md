@@ -2,6 +2,30 @@
 
 This document describes the key environment variables that can be configured to optimize VeOmni performance on Ascend NPUs.
 
+## VEOMNI_NPU_JIT_COMPILE
+
+```bash
+export VEOMNI_NPU_JIT_COMPILE=false
+```
+
+When set, VeOmni calls `torch.npu.set_compile_mode` during device setup. Use `false` to disable operator JIT compilation and prefer the available precompiled operator binaries, or `true` to enable operator JIT compilation. This setting does not fix input shapes and is separate from `torch.compile`.
+
+Leave this variable unset to preserve the NPU runtime's default compile mode. It has no effect on GPU or CPU runs. Compare steady-state step time on the same workload before adopting either mode.
+
+## NPU_CPU_AFFINITY_ENABLE
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NPU_CPU_AFFINITY_ENABLE=true
+bash train.sh tasks/train_vlm.py path/to/config.yaml
+```
+
+The default is `false`. This policy uses the CPU layout verified on the eight-card ModelArts Ascend 950DT node. The VLM entry applies it before importing VeOmni and torch, so runtime threads and DataLoader workers inherit the CPU mask.
+
+The helper requires eight local ranks and the explicit device order shown above. It uses `npu-smi info -m` to verify that the rank's NPU is an Ascend950DT with the expected physical device ID. Local ranks 0–7 receive CPU masks `144-155`, `156-167`, `48-59`, `60-71`, `72-83`, `84-95`, `168-179`, and `180-191`, respectively.
+
+Successful binding prints the actual CPU mask in a `[cpu-affinity]` log line. If device detection or binding fails, training continues with a diagnostic message. Use one CPU binding policy at a time when comparing performance.
+
 ## CPU_AFFINITY_CONF
 
 ```shell
